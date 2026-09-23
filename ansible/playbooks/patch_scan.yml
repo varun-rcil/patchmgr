@@ -1,0 +1,236 @@
+---
+# patch_scan.yml - READ ONLY. Discovers pending updates, installs nothing.
+# Safe to run hourly. This is what keeps the dashboard current.
+#
+#   ansible-playbook playbooks/patch_scan.yml
+#   ansible-playbook playbooks/patch_scan.yml -l ring_prod
+
+- name: Allocate a run id
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Generate run id
+      ansible.builtin.set_fact:
+        patch_run_id: "{{ 999999999999 | random | to_uuid }}"
+        patch_run_started: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime }}"
+
+    - name: Create run directory
+      ansible.builtin.file:
+        path: "{{ patchmgr_scan_dir }}/{{ patch_run_id }}"
+        state: directory
+        mode: '0750'
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: "run_id={{ patch_run_id }} dir={{ patchmgr_scan_dir }}/{{ patch_run_id }}"
+
+- name: Scan Windows hosts for pending updates
+  hosts: windows
+  gather_facts: false
+  # A stuck WUA on one host must not stall the whole run.
+  strategy: free
+  any_errors_fatal: false
+  vars:
+    run_id: "{{ hostvars['localhost']['patch_run_id'] }}"
+    run_dir: "{{ hostvars['localhost']['patchmgr_scan_dir'] }}/{{ run_id }}"
+
+  tasks:
+    - name: Check host is reachable
+      ansible.windows.win_ping:
+      register: ping_result
+      ignore_errors: true
+
+    - name: Record unreachable host and skip
+      when: ping_result is failed
+      block:
+        - name: Write failure stub
+          ansible.builtin.copy:
+            content: >-
+              {{ {'hostname': inventory_hostname_short,
+                  'fqdn': inventory_hostname,
+                  'scan_ok': false,
+                  'scan_error': 'unreachable: ' ~ (ping_result.msg | default('winrm failed')),
+                  'updates': [], 'installed_kbs': []} | to_json }}
+            dest: "{{ run_dir }}/{{ inventory_hostname }}.json"
+            mode: '0640'
+          delegate_to: localhost
+
+        - name: End play for this host
+          ansible.builtin.meta: end_host
+
+    - name: Stage the scanner script
+      ansible.windows.win_copy:
+        src: files/Get-PendingUpdates.ps1
+        dest: C:\Windows\Temp\Get-PendingUpdates.ps1
+      changed_when: false
+
+    # become/runas SYSTEM gives the WUA COM API the local token it needs.
+    # Without this you get 0x80240438 / access denied on an online search.
+    - name: Query Windows Update Agent
+      ansible.windows.win_shell: >-
+        powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File C:\Windows\Temp\Get-PendingUpdates.ps1
+        -Source {{ patch_source }}
+      become: true
+      become_method: runas
+      become_user: SYSTEM
+      register: scan_raw
+      changed_when: false
+      failed_when: false
+      # WUA online search against Microsoft can genuinely take minutes.
+      async: 1200
+      poll: 15
+
+    - name: Fail loudly if the scanner produced nothing parseable
+      ansible.builtin.set_fact:
+        scan_payload: >-
+          {{ scan_raw.stdout | default('') | trim }}
+
+    - name: Write scan result to the control node
+      ansible.builtin.copy:
+        content: "{{ scan_payload }}"
+        dest: "{{ run_dir }}/{{ inventory_hostname }}.json"
+        mode: '0640'
+      delegate_to: localhost
+      when: scan_payload | length > 0
+
+    - name: Write error stub when the scanner failed
+      ansible.builtin.copy:
+        content: >-
+          {{ {'hostname': inventory_hostname_short,
+              'fqdn': inventory_hostname,
+              'scan_ok': false,
+              'scan_error': (scan_raw.stderr | default('scanner returned no output'))[:2000],
+              'updates': [], 'installed_kbs': []} | to_json }}
+        dest: "{{ run_dir }}/{{ inventory_hostname }}.json"
+        mode: '0640'
+      delegate_to: localhost
+      when: scan_payload | length == 0
+
+    - name: Clean up
+      ansible.windows.win_file:
+        path: C:\Windows\Temp\Get-PendingUpdates.ps1
+        state: absent
+      changed_when: false
+
+- name: Scan Linux hosts for pending updates
+  hosts: linux
+  gather_facts: false
+  strategy: free
+  any_errors_fatal: false
+  vars:
+    run_id: "{{ hostvars['localhost']['patch_run_id'] }}"
+    run_dir: "{{ hostvars['localhost']['patchmgr_scan_dir'] }}/{{ run_id }}"
+
+  tasks:
+    - name: Check host is reachable
+      ansible.builtin.ping:
+      register: ping_result
+      ignore_errors: true
+
+    - name: Record unreachable host and skip
+      when: ping_result is failed
+      block:
+        - name: Write failure stub
+          ansible.builtin.copy:
+            content: >-
+              {{ {'hostname': inventory_hostname_short,
+                  'fqdn': inventory_hostname,
+                  'os_family': ('rhel' if 'rhel' in group_names else 'debian'),
+                  'scan_ok': false,
+                  'scan_error': 'unreachable: ' ~ (ping_result.msg | default('ssh failed')),
+                  'updates': [], 'installed_kbs': []} | to_json }}
+            dest: "{{ run_dir }}/{{ inventory_hostname }}.json"
+            mode: '0640'
+          delegate_to: localhost
+
+        - name: End play for this host
+          ansible.builtin.meta: end_host
+
+    - name: Stage the scanner
+      ansible.builtin.copy:
+        src: files/scan_linux.py
+        dest: /usr/local/sbin/patchmgr-scan.py
+        mode: '0750'
+        owner: root
+      changed_when: false
+
+    # Root because refreshing repo metadata (dnf makecache / apt update inside
+    # the scanner) needs it; the scanner itself installs nothing.
+    - name: Run the scanner
+      ansible.builtin.command: /usr/bin/python3 /usr/local/sbin/patchmgr-scan.py
+      register: scan_raw
+      changed_when: false
+      failed_when: false
+      async: 1200
+      poll: 15
+
+    - name: Collect result
+      ansible.builtin.set_fact:
+        scan_payload: "{{ scan_raw.stdout | default('') | trim }}"
+
+    - name: Write scan result to the control node
+      ansible.builtin.copy:
+        content: "{{ scan_payload }}"
+        dest: "{{ run_dir }}/{{ inventory_hostname }}.json"
+        mode: '0640'
+      delegate_to: localhost
+      when: scan_payload | length > 0
+
+    - name: Write error stub when the scanner failed
+      ansible.builtin.copy:
+        content: >-
+          {{ {'hostname': inventory_hostname_short,
+              'fqdn': inventory_hostname,
+              'os_family': ('rhel' if 'rhel' in group_names else 'debian'),
+              'scan_ok': false,
+              'scan_error': (scan_raw.stderr | default('scanner returned no output'))[:2000],
+              'updates': [], 'installed_kbs': []} | to_json }}
+        dest: "{{ run_dir }}/{{ inventory_hostname }}.json"
+        mode: '0640'
+      delegate_to: localhost
+      when: scan_payload | length == 0
+
+- name: Load results into PostgreSQL
+  hosts: localhost
+  gather_facts: false
+  vars:
+    run_id: "{{ patch_run_id }}"
+  tasks:
+    - name: Build hostname -> ring map from inventory
+      ansible.builtin.template:
+        src: ../templates/rings.json.j2
+        dest: "{{ patchmgr_scan_dir }}/{{ run_id }}/_rings.json"
+        mode: '0640'
+
+    - name: Ingest scan JSON
+      ansible.builtin.command:
+        argv:
+          - /opt/patchmgr/venv/bin/python
+          - /opt/patchmgr/scripts/load_scan.py
+          - --scan-dir
+          - "{{ patchmgr_scan_dir }}/{{ run_id }}"
+          - --run-id
+          - "{{ run_id }}"
+          - --source
+          - "{{ patch_source }}"
+          - --ring-map
+          - "{{ patchmgr_scan_dir }}/{{ run_id }}/_rings.json"
+          - --initiated-by
+          - "{{ lookup('env', 'USER') | default('cron', true) }}"
+      environment:
+        PATCHMGR_DSN: "{{ lookup('env', 'PATCHMGR_DSN') }}"
+      register: load_result
+      changed_when: true
+      # rc 3 = some hosts failed to scan; the run still loaded and is worth keeping.
+      failed_when: load_result.rc not in [0, 3]
+
+    - name: Summary
+      ansible.builtin.debug:
+        var: load_result.stderr_lines
+
+    - name: Prune scan dirs older than 30 days
+      ansible.builtin.shell: >-
+        find {{ patchmgr_scan_dir }} -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
+      changed_when: false

@@ -1,0 +1,42 @@
+---
+# Vars needed by BOTH the Windows plays and the localhost load/report plays.
+# These cannot live in group_vars/windows.yml because localhost is not in that group.
+
+patchmgr_root: /var/lib/patchmgr
+patchmgr_scan_dir: "{{ patchmgr_root }}/scans"
+patchmgr_log_dir: /var/log/patchmgr
+patchmgr_install_root: /opt/patchmgr
+patchmgr_python: "{{ patchmgr_install_root }}/venv/bin/python"
+
+# MicrosoftUpdate | WindowsUpdate | WSUS
+patch_source: MicrosoftUpdate
+
+# Retention for raw scan JSON on disk.
+patchmgr_scan_retention_days: 30
+
+# ---------------------------------------------------------------------------
+# Pre-patch snapshots
+# ---------------------------------------------------------------------------
+# none    - no automated snapshot. VMware Workstation belongs here: there is no
+#           API reachable from inside a guest VM, so snapshot manually in the
+#           Workstation UI before an apply run.
+# nutanix - crash-consistent AHV snapshot via the Prism Element v2 API.
+snapshot_provider: none
+
+nutanix_pe_host: ""                     # Prism Element VIP, e.g. 192.168.100.5
+nutanix_pe_port: 9440
+nutanix_user: admin
+nutanix_password: "{{ vault_nutanix_password | default('') }}"
+nutanix_validate_certs: false           # true once Prism has a trusted cert
+nutanix_snapshot_prefix: prepatch
+
+# ---------------------------------------------------------------------------
+# Cross-OS patch policy (windows.yml may override any of these for that family)
+# serial: how many hosts of a ring patch at once - canary all, prod cautiously.
+patch_serial:
+  ring_canary: "100%"
+  ring_pilot: "50%"
+  ring_prod: "25%"
+patch_max_fail_percentage: 30
+patch_reboot_allowed: true
+patch_reboot_timeout: 1200

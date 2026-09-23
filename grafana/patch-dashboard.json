@@ -1,0 +1,842 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "title": "Patch & Vulnerability Management - Windows / RHEL / Ubuntu",
+  "uid": "patchmgr-main",
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "ring",
+        "label": "Ring",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "patchmgr"
+        },
+        "query": "SELECT DISTINCT ring FROM hosts ORDER BY ring",
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "os",
+        "label": "OS",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "patchmgr"
+        },
+        "query": "SELECT DISTINCT os_family FROM hosts ORDER BY os_family",
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "severity",
+        "label": "Min severity",
+        "type": "custom",
+        "query": "Critical only : 4, Important and up : 3, Moderate and up : 2, Everything : 0",
+        "current": {
+          "text": "Everything",
+          "value": "0"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Estate overview",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Hosts monitored",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*)::int AS \"Hosts\" FROM hosts WHERE ring IN ($ring) AND os_family IN ($os)",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Pending updates",
+      "description": "Total across the estate from the most recent scan run.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "orange",
+                "value": 25
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*)::int AS \"Pending\" FROM v_pending_updates WHERE ring IN ($ring) AND os_family IN ($os) AND severity_rank >= $severity",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Critical missing",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*)::int AS \"Critical\" FROM v_pending_updates WHERE ring IN ($ring) AND os_family IN ($os) AND severity = 'Critical'",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Awaiting reboot",
+      "description": "Patches installed but not effective until the host restarts.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*)::int AS \"Reboot pending\" FROM hosts WHERE reboot_pending AND ring IN ($ring) AND os_family IN ($os)",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Download size",
+      "description": "Total bytes to pull if every pending update were approved.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(size_bytes),0)::bigint AS \"Bytes\" FROM v_pending_updates WHERE ring IN ($ring) AND os_family IN ($os)",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Stale scans",
+      "description": "Hosts not successfully scanned in 48h. Silence here is not compliance.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*)::int AS \"Stale\" FROM hosts WHERE ring IN ($ring) AND os_family IN ($os) AND (last_seen < now() - interval '48 hours' OR NOT scan_ok)",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "What can be downloaded and applied",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Available patches (KB / errata / package)",
+      "description": "The operator worklist across every OS. Approve with approve.sh, then run patch_apply.yml for the ring. Patch ids link to the vendor advisory where one exists.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 16,
+        "x": 0,
+        "y": 6
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Severity",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Size"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Age (d)"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 14
+                    },
+                    {
+                      "color": "orange",
+                      "value": 30
+                    },
+                    {
+                      "color": "red",
+                      "value": 60
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Severity"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Critical": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "Important": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "Moderate": {
+                        "color": "yellow",
+                        "index": 2
+                      },
+                      "Low": {
+                        "color": "green",
+                        "index": 3
+                      },
+                      "Security": {
+                        "color": "orange",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Approval"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "approved": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "pending": {
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "rejected": {
+                        "color": "red",
+                        "index": 2
+                      },
+                      "deferred": {
+                        "color": "blue",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Patch"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Vendor advisory",
+                    "url": "${__data.fields.URL}",
+                    "targetBlank": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "URL"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT patch_id AS \"Patch\", MAX(os_family) AS \"OS\", title AS \"Title\", severity AS \"Severity\", SUM(affected_hosts)::int AS \"Hosts\", MAX(size_bytes) AS \"Size\", MAX(age_days) AS \"Age (d)\", bool_or(needs_reboot) AS \"Reboot\", string_agg(DISTINCT ring || ':' || approval_status, ', ') AS \"Approval\", array_to_string(MAX(cve_ids), ', ') AS \"CVEs\", MAX(support_url) AS \"URL\" FROM v_patch_rollup WHERE ring IN ($ring) AND os_family IN ($os) AND severity_rank >= $severity GROUP BY patch_id, title, severity, severity_rank ORDER BY severity_rank DESC, SUM(affected_hosts) DESC",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "barchart",
+      "title": "Pending by severity",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT severity AS \"Severity\", COUNT(*)::int AS \"Count\" FROM v_pending_updates WHERE ring IN ($ring) AND os_family IN ($os) GROUP BY severity, severity_rank ORDER BY severity_rank DESC",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Per-host detail",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      }
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "Host compliance",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Critical",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Critical"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Download"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last scan"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT hostname AS \"Host\", os_family AS \"OS\", ring AS \"Ring\", os_name AS \"System\", os_build AS \"Build/Kernel\", pending_total AS \"Pending\", pending_critical AS \"Critical\", pending_important AS \"Important\", oldest_missing_days AS \"Oldest (d)\", download_bytes AS \"Download\", reboot_pending AS \"Reboot\", last_seen AS \"Last scan\", COALESCE(scan_error,'') AS \"Error\" FROM v_host_compliance WHERE ring IN ($ring) AND os_family IN ($os) ORDER BY pending_critical DESC, pending_total DESC",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Trend and audit",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Pending updates over time",
+      "description": "A healthy estate saws downward after each Patch Tuesday. A flat rising line means the apply step is not running.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, pending_total AS \"Total pending\", pending_high AS \"Important+\" FROM v_compliance_trend WHERE $__timeFilter(ts) ORDER BY ts",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "table",
+      "title": "Recent patch activity",
+      "datasource": {
+        "type": "postgres",
+        "uid": "patchmgr"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Result"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "success": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "failed": {
+                        "color": "red",
+                        "index": 1
+                      },
+                      "skipped": {
+                        "color": "text",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT ts AS \"Time\", hostname AS \"Host\", COALESCE(patch_id,'-') AS \"Patch\", action AS \"Action\", result AS \"Result\", COALESCE(message,'') AS \"Message\" FROM patch_events WHERE $__timeFilter(ts) ORDER BY ts DESC LIMIT 300",
+          "rawQuery": true
+        }
+      ]
+    }
+  ]
+}

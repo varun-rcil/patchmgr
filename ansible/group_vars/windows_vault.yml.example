@@ -1,0 +1,14 @@
+---
+# Template for the ENCRYPTED vault file. Do not use this plaintext file as-is.
+#
+#   ansible-vault create /opt/patchmgr/ansible/group_vars/windows_vault.yml
+#   (paste the keys below with real values)
+#
+# Store the vault password so the systemd timers can decrypt unattended:
+#   echo 'your-vault-password' | sudo tee /etc/patchmgr/vault_pass
+#   sudo chmod 600 /etc/patchmgr/vault_pass
+#
+# The .example suffix keeps Ansible from loading this plaintext file.
+
+vault_patchmgr_password: "local-admin-password-for-svc_patchmgr"
+vault_nutanix_password: "prism-element-password"    # only if snapshot_provider: nutanix

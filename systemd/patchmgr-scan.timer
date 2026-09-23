@@ -1,0 +1,14 @@
+[Unit]
+Description=patchmgr - periodic patch discovery
+Documentation=file:/opt/patchmgr/README.md
+
+[Timer]
+# Every 6 hours, plus a catch-up run if the machine was off.
+OnCalendar=*-*-* 01,07,13,19:15:00
+# Spread load so a large estate does not hammer Microsoft Update simultaneously.
+RandomizedDelaySec=1800
+Persistent=true
+Unit=patchmgr-scan.service
+
+[Install]
+WantedBy=timers.target

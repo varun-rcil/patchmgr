@@ -1,0 +1,12 @@
+---
+# Linux targets: plain SSH + sudo. Key-only login for the automation user,
+# created by install/bootstrap-linux-target.sh.
+ansible_connection: ssh
+ansible_user: svc_patchmgr
+ansible_ssh_private_key_file: /etc/patchmgr/ssh/id_ed25519
+ansible_become: true
+ansible_become_method: sudo
+
+# Reboot behaviour shared with Windows policy (patch_reboot_allowed etc. can be
+# overridden per host/group exactly as before).
+patch_reboot_timeout: 1200

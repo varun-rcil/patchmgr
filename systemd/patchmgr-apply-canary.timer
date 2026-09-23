@@ -1,0 +1,12 @@
+[Unit]
+Description=patchmgr - canary ring maintenance window
+
+[Timer]
+# Wednesday 02:00, the week after Patch Tuesday lands.
+OnCalendar=Wed *-*-* 02:00:00
+RandomizedDelaySec=600
+Persistent=false
+Unit=patchmgr-apply-canary.service
+
+[Install]
+WantedBy=timers.target

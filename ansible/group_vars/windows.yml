@@ -1,0 +1,66 @@
+---
+# ---------------------------------------------------------------------------
+# Connection - WORKGROUP MODE (no Active Directory)
+# ---------------------------------------------------------------------------
+# NTLM over HTTPS against a LOCAL administrator account on each target.
+# Create the account with:  Bootstrap-WindowsTarget.ps1 -CreateServiceAccount ...
+#
+# NTLM has no mutual authentication - the client cannot tell a real server from
+# an impersonator. The HTTPS listener plus CERTIFICATE VALIDATION is what closes
+# that gap, so keep validation on outside a throwaway lab. With 'ignore',
+# anything answering on 5986 can collect the credential exchange.
+ansible_connection: winrm
+ansible_port: 5986
+ansible_winrm_scheme: https
+ansible_winrm_transport: ntlm
+ansible_user: svc_patchmgr            # local account; try ".\\svc_patchmgr" if auth fails
+ansible_password: "{{ vault_patchmgr_password }}"
+
+# CA produced by install/make_ca.sh; 'make_ca.sh trust' drops it at this path.
+ansible_winrm_server_cert_validation: validate
+ansible_winrm_ca_trust_path: /etc/patchmgr/winrm-ca.pem
+# Lab shortcut (VMware Workstation, self-signed certs):
+#   ansible_winrm_server_cert_validation: ignore
+
+ansible_winrm_read_timeout_sec: 900
+ansible_winrm_operation_timeout_sec: 840
+
+# ---------------------------------------------------------------------------
+# If you add AD later, switch to Kerberos and delete the NTLM block above:
+#   ansible_winrm_transport: kerberos
+#   ansible_user: "svc_patchmgr@CORP.EXAMPLE.COM"
+#   (no ansible_password; use a keytab + kinit as the systemd units originally did)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Patch policy
+# ---------------------------------------------------------------------------
+# NOTE: patch_source and patchmgr_* paths live in group_vars/all.yml so that
+# the localhost loader plays can see them too.
+
+patch_categories:
+  - CriticalUpdates
+  - SecurityUpdates
+  - UpdateRollups
+  - DefinitionUpdates
+
+# Never auto-install these, whatever the approval table says.
+# Feature updates and driver pushes should be a deliberate, separate project.
+patch_global_reject:
+  - 'Preview of Monthly Quality Rollup'
+  - 'Feature update'
+  - 'Windows Malicious Software Removal Tool'   # noisy, low value on servers
+  - '^Silverlight'
+
+patch_reboot_allowed: true
+patch_reboot_timeout: 3600
+patch_max_fail_percentage: 10
+
+# How many hosts patch at once, per ring.
+patch_serial:
+  ring_canary: 2
+  ring_pilot: '25%'
+  ring_prod: '10%'
+
+# Free disk required on C: before we let a cumulative update run.
+patch_min_free_gb: 12

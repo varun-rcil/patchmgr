@@ -1,0 +1,11 @@
+---
+# RHEL / CentOS / Rocky / Alma / Oracle, versions 7 through 10.
+#
+# ansible-core 2.17+ dropped Python 2.7 targets, and RHEL 7's default python
+# is 2.7. bootstrap-linux-target.sh installs python3 (in base repos since 7.7),
+# and this pin makes every EL release use it. EL8 minimal lacks /usr/bin/python3
+# until the bootstrap installs it - another reason the bootstrap is not optional.
+ansible_python_interpreter: /usr/bin/python3
+
+# Apply granularity on this family is the errata advisory:
+#   dnf/yum update --advisory=RHSA-2026:0123

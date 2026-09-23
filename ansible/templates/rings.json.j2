@@ -1,0 +1,6 @@
+{
+{% for h in groups['patch_targets'] | default(groups['windows'] | default([])) | sort %}
+{%- set ring = (hostvars[h].group_names | select('match', '^ring_') | list | first | default('ring_prod')) | regex_replace('^ring_', '') %}
+  "{{ hostvars[h].inventory_hostname_short }}": "{{ ring }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+}

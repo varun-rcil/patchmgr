@@ -1,0 +1,32 @@
+[Unit]
+Description=patchmgr - scan Windows hosts for pending updates
+Documentation=file:/opt/patchmgr/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=patchmgr
+Group=patchmgr
+EnvironmentFile=/etc/patchmgr/patchmgr.env
+# Vault password so unattended runs can decrypt group_vars/windows_vault.yml
+Environment=ANSIBLE_VAULT_PASSWORD_FILE=/etc/patchmgr/vault_pass
+WorkingDirectory=/opt/patchmgr/ansible
+ExecStart=/opt/patchmgr/venv/bin/ansible-playbook playbooks/patch_scan.yml
+TimeoutStartSec=5400
+Nice=10
+IOSchedulingClass=idle
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/patchmgr /var/log/patchmgr /tmp
+ReadOnlyPaths=/etc/patchmgr
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

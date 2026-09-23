@@ -1,0 +1,346 @@
+---
+# patch_apply.yml - downloads and installs ONLY KBs marked 'approved' for the
+# target ring in patch_approvals. Nothing installs by default; approval is explicit.
+#
+#   # dry run, shows what would install
+#   ansible-playbook playbooks/patch_apply.yml -l ring_canary --check
+#
+#   # download only, no install, no reboot - warm the cache ahead of a window
+#   ansible-playbook playbooks/patch_apply.yml -l ring_pilot -e patch_state=downloaded
+#
+#   # real run
+#   ansible-playbook playbooks/patch_apply.yml -l ring_prod
+
+- name: Resolve approved KBs for this run
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  vars:
+    target_ring: "{{ ring | default('prod') }}"
+  tasks:
+    - name: Validate the ring name
+      ansible.builtin.assert:
+        that: target_ring is match('^[a-z0-9_]+$')
+        fail_msg: "ring must match ^[a-z0-9_]+$ (got '{{ target_ring }}')"
+
+    - name: Fetch approved KBs from the gate
+      ansible.builtin.command:
+        argv:
+          - psql
+          - "{{ lookup('env', 'PATCHMGR_DSN') | default('postgresql://patchmgr@localhost/patchmgr', true) }}"
+          - -X
+          - -A
+          - -t
+          - -c
+          - >-
+            SELECT kb FROM patch_approvals
+            WHERE ring = '{{ target_ring }}'
+              AND status = 'approved'
+              AND (not_before IS NULL OR not_before <= CURRENT_DATE)
+      register: approved
+      changed_when: false
+
+    - name: Build accept lists per OS family
+      ansible.builtin.set_fact:
+        approved_ids: "{{ approved.stdout_lines | map('trim') | reject('equalto', '') | list }}"
+
+    - name: Split by patch-id shape
+      ansible.builtin.set_fact:
+        # KB####          -> Windows
+        # XXSA-YYYY:NNNN  -> RHEL-family errata (RHSA/RHBA/RHEA/ALSA/RLSA/...)
+        # everything else -> apt package names
+        approved_win: "{{ approved_ids | select('match', '^KB[0-9]+$') | list }}"
+        approved_rpm: "{{ approved_ids | select('match', '^[A-Z]{2,6}-[0-9]{4}:[0-9]+$') | list }}"
+    - name: Derive the apt list
+      ansible.builtin.set_fact:
+        approved_deb: "{{ approved_ids | difference(approved_win) | difference(approved_rpm) }}"
+
+    - name: Refuse to run with an empty accept list
+      ansible.builtin.assert:
+        that: approved_ids | length > 0
+        fail_msg: >-
+          Nothing approved for ring '{{ target_ring }}'.
+          Approve with: scripts/approve.sh approve {{ target_ring }} KB5034129 RHSA-2026:0123 openssl
+        success_msg: >-
+          {{ target_ring }}: {{ approved_win | length }} KB,
+          {{ approved_rpm | length }} errata, {{ approved_deb | length }} apt package(s)
+
+    - name: Show what will be applied
+      ansible.builtin.debug:
+        msg:
+          windows: "{{ approved_win }}"
+          rhel_errata: "{{ approved_rpm }}"
+          apt_packages: "{{ approved_deb }}"
+
+- name: Apply approved updates - Windows
+  hosts: windows
+  gather_facts: false
+  # Ring pacing. target_ring comes in as an extra-var (the systemd units and the
+  # README always pair -e target_ring=X with --limit ring_X - the extra-var
+  # gates WHAT is approved, the limit gates WHO gets it).
+  serial: "{{ patch_serial['ring_' ~ (target_ring | default('prod'))] | default('25%') }}"
+  max_fail_percentage: "{{ patch_max_fail_percentage | default(30) }}"
+  vars:
+    approved_kbs: "{{ hostvars['localhost']['approved_win'] }}"
+    patch_state: installed          # override with -e patch_state=downloaded
+    log_path: C:\Windows\Temp\ansible-win-updates.log
+
+  pre_tasks:
+    - name: Nothing approved for Windows - skip this play
+      ansible.builtin.meta: end_play
+      when: approved_kbs | length == 0
+
+    - name: Confirm connectivity
+      ansible.windows.win_ping:
+
+    - name: Check free space on the system drive
+      ansible.windows.win_shell: |
+        $d = Get-PSDrive C
+        [math]::Round($d.Free / 1GB, 1)
+      register: free_gb
+      changed_when: false
+
+    - name: Abort this host if the system drive is too full
+      ansible.builtin.assert:
+        that: (free_gb.stdout | trim | float) >= (patch_min_free_gb | float)
+        fail_msg: >-
+          Only {{ free_gb.stdout | trim }} GB free on C:, need {{ patch_min_free_gb }} GB.
+          A cumulative update that runs out of space mid-install can leave the
+          servicing stack in a broken state. Clear space first.
+
+    # Pre-patch snapshot hook. Set in group_vars/all.yml:
+    #   snapshot_provider: nutanix      (Prism Element v2 API, works on AHV)
+    #   snapshot_provider: none         (default - e.g. VMware Workstation,
+    #                                    which has no API reachable from inside
+    #                                    a guest; snapshot manually in the UI)
+    - name: Pre-patch snapshot ({{ snapshot_provider | default('none') }})
+      ansible.builtin.include_tasks: "tasks/snapshot_{{ snapshot_provider }}.yml"
+      when: (snapshot_provider | default('none')) != 'none'
+
+  tasks:
+    - name: Download and install approved updates
+      ansible.windows.win_updates:
+        category_names: "{{ patch_categories }}"
+        # Anchoring on ^KB...$ stops KB5034129 from matching KB50341290.
+        accept_list: "{{ approved_kbs | map('regex_replace', '^(.*)$', '^\\1$') | list }}"
+        reject_list: "{{ patch_global_reject }}"
+        state: "{{ patch_state }}"
+        server_selection: "{{ 'windows_update' if patch_source == 'WindowsUpdate' else 'default' }}"
+        reboot: false            # reboots are orchestrated below, not by the module
+        log_path: "{{ log_path }}"
+      become: true
+      become_method: runas
+      become_user: SYSTEM
+      register: update_result
+      # win_updates is long-running by nature; do not let SSH/WinRM idle-timeout kill it.
+      async: 7200
+      poll: 30
+
+    - name: Report per-host outcome
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          found={{ update_result.found_update_count | default(0) }}
+          installed={{ update_result.installed_update_count | default(0) }}
+          failed={{ update_result.failed_update_count | default(0) }}
+          reboot_required={{ update_result.reboot_required | default(false) }}
+
+    - name: Record events to the audit trail
+      ansible.builtin.command:
+        argv:
+          - /opt/patchmgr/venv/bin/python
+          - /opt/patchmgr/scripts/record_events.py
+          - --hostname
+          - "{{ inventory_hostname_short }}"
+          - --json
+          - "{{ update_result | to_json }}"
+      delegate_to: localhost
+      environment:
+        PATCHMGR_DSN: "{{ lookup('env', 'PATCHMGR_DSN') }}"
+      changed_when: false
+
+    - name: Reboot if the update requires it
+      ansible.windows.win_reboot:
+        reboot_timeout: "{{ patch_reboot_timeout }}"
+        post_reboot_delay: 30
+        # Do not declare success until the box is actually serving.
+        test_command: 'Get-Service -Name Winmgmt | Where-Object Status -eq "Running"'
+      when:
+        - update_result.reboot_required | default(false)
+        - patch_reboot_allowed | bool
+
+    - name: Warn when a reboot is owed but not permitted
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} needs a reboot to finish patching but
+          patch_reboot_allowed is false. Updates are staged, not effective.
+      when:
+        - update_result.reboot_required | default(false)
+        - not (patch_reboot_allowed | bool)
+
+  post_tasks:
+    - name: Verify critical services came back
+      ansible.windows.win_service_info:
+        name: "{{ item }}"
+      loop: "{{ post_patch_services | default(['Winmgmt', 'LanmanServer', 'W32Time']) }}"
+      register: svc_check
+      failed_when: >-
+        svc_check.services | length == 0 or
+        svc_check.services[0].state != 'started'
+
+    - name: Rescan this host so the dashboard reflects reality immediately
+      ansible.builtin.debug:
+        msg: "Run patch_scan.yml -l {{ inventory_hostname }} to refresh the dashboard."
+
+# ---------------------------------------------------------------------------
+- name: Apply approved errata - RHEL family
+  hosts: rhel
+  gather_facts: true          # ansible_pkg_mgr picks dnf vs yum for us
+  # Ring pacing. target_ring comes in as an extra-var (the systemd units and the
+  # README always pair -e target_ring=X with --limit ring_X - the extra-var
+  # gates WHAT is approved, the limit gates WHO gets it).
+  serial: "{{ patch_serial['ring_' ~ (target_ring | default('prod'))] | default('25%') }}"
+  max_fail_percentage: "{{ patch_max_fail_percentage | default(30) }}"
+  vars:
+    approved_rpm: "{{ hostvars['localhost']['approved_rpm'] }}"
+
+  pre_tasks:
+    - name: Nothing approved for RHEL - skip this play
+      ansible.builtin.meta: end_play
+      when: approved_rpm | length == 0
+
+    - name: Pre-patch snapshot ({{ snapshot_provider | default('none') }})
+      ansible.builtin.include_tasks: "tasks/snapshot_{{ snapshot_provider }}.yml"
+      when: (snapshot_provider | default('none')) != 'none'
+
+  tasks:
+    # --advisory only touches packages covered by those errata; other pending
+    # updates stay pending, exactly like the Windows accept_list.
+    - name: Apply advisories with {{ ansible_pkg_mgr }}
+      vars:
+        advisory_flags: "{{ approved_rpm | map('regex_replace', '^', '--advisory=') | list }}"
+      ansible.builtin.command:
+        argv: "{{ [ansible_pkg_mgr, '-y', 'update'] + advisory_flags }}"
+      register: rpm_result
+      changed_when: "'Nothing to do' not in rpm_result.stdout"
+      failed_when: rpm_result.rc != 0
+      async: 3600
+      poll: 20
+
+    - name: Record events
+      ansible.builtin.command:
+        argv:
+          - /opt/patchmgr/venv/bin/python
+          - /opt/patchmgr/scripts/record_events.py
+          - --hostname
+          - "{{ inventory_hostname_short }}"
+          - --events-json
+          - >-
+            {{ approved_rpm | map('community.general.dict_kv', 'patch_id')
+               | map('combine', {'action': 'install',
+                                 'result': ('success' if rpm_result.rc == 0 else 'failed'),
+                                 'message': ('applied' if 'Nothing to do' not in rpm_result.stdout
+                                             else 'nothing to do (already current or errata not applicable)')})
+               | list | to_json }}
+      delegate_to: localhost
+      become: false
+      environment:
+        PATCHMGR_DSN: "{{ lookup('env', 'PATCHMGR_DSN') }}"
+      changed_when: false
+
+    - name: Check whether a reboot is needed
+      ansible.builtin.command: needs-restarting -r
+      register: needs_reboot
+      changed_when: false
+      failed_when: needs_reboot.rc not in [0, 1]
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ patch_reboot_timeout }}"
+        post_reboot_delay: 15
+      when:
+        - needs_reboot.rc == 1
+        - patch_reboot_allowed | default(true) | bool
+
+    - name: Warn when a reboot is owed but not permitted
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} needs a reboot (kernel/glibc/systemd updated) but patch_reboot_allowed is false."
+      when:
+        - needs_reboot.rc == 1
+        - not (patch_reboot_allowed | default(true) | bool)
+
+# ---------------------------------------------------------------------------
+- name: Apply approved packages - Ubuntu/Debian
+  hosts: ubuntu
+  gather_facts: false
+  # Ring pacing. target_ring comes in as an extra-var (the systemd units and the
+  # README always pair -e target_ring=X with --limit ring_X - the extra-var
+  # gates WHAT is approved, the limit gates WHO gets it).
+  serial: "{{ patch_serial['ring_' ~ (target_ring | default('prod'))] | default('25%') }}"
+  max_fail_percentage: "{{ patch_max_fail_percentage | default(30) }}"
+  vars:
+    approved_deb: "{{ hostvars['localhost']['approved_deb'] }}"
+
+  pre_tasks:
+    - name: Nothing approved for Ubuntu - skip this play
+      ansible.builtin.meta: end_play
+      when: approved_deb | length == 0
+
+    - name: Pre-patch snapshot ({{ snapshot_provider | default('none') }})
+      ansible.builtin.include_tasks: "tasks/snapshot_{{ snapshot_provider }}.yml"
+      when: (snapshot_provider | default('none')) != 'none'
+
+  tasks:
+    # only_upgrade means: never INSTALL a package that is absent on this host.
+    # A ring-wide approval of 'nginx' upgrades hosts that have nginx and is a
+    # clean no-op on hosts that do not - which is what an approval should mean.
+    - name: Upgrade approved packages
+      ansible.builtin.apt:
+        name: "{{ approved_deb }}"
+        state: latest
+        only_upgrade: true
+        update_cache: true
+        cache_valid_time: 1800
+      register: apt_result
+      async: 3600
+      poll: 20
+
+    - name: Record events
+      ansible.builtin.command:
+        argv:
+          - /opt/patchmgr/venv/bin/python
+          - /opt/patchmgr/scripts/record_events.py
+          - --hostname
+          - "{{ inventory_hostname_short }}"
+          - --events-json
+          - >-
+            {{ approved_deb | map('community.general.dict_kv', 'patch_id')
+               | map('combine', {'action': 'install',
+                                 'result': ('success' if apt_result is succeeded else 'failed'),
+                                 'message': ('upgraded' if apt_result is changed else 'already current or not installed')})
+               | list | to_json }}
+      delegate_to: localhost
+      become: false
+      environment:
+        PATCHMGR_DSN: "{{ lookup('env', 'PATCHMGR_DSN') }}"
+      changed_when: false
+
+    - name: Check for reboot marker
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_marker
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ patch_reboot_timeout }}"
+        post_reboot_delay: 15
+      when:
+        - reboot_marker.stat.exists
+        - patch_reboot_allowed | default(true) | bool
+
+    - name: Warn when a reboot is owed but not permitted
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has /var/run/reboot-required but patch_reboot_allowed is false."
+      when:
+        - reboot_marker.stat.exists
+        - not (patch_reboot_allowed | default(true) | bool)

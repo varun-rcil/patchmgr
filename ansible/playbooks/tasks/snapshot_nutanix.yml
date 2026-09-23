@@ -1,0 +1,98 @@
+---
+# snapshot_nutanix.yml - crash-consistent VM snapshot on Nutanix AHV before
+# patching, via the Prism Element v2 REST API on :9440.
+#
+# Uses raw REST rather than the nutanix.ncp collection because the v2 snapshot
+# endpoint is stable across AOS releases and needs nothing installed beyond
+# what the control node already has.
+#
+# Required (group_vars/all.yml + vault):
+#   snapshot_provider: nutanix
+#   nutanix_pe_host:   <Prism Element VIP or CVM IP>
+#   vault_nutanix_password in the vault
+#
+# The VM name in Prism must equal inventory_hostname_short; override per host
+# with nutanix_vm_name if it differs.
+
+- name: Assert Prism connection details are configured
+  ansible.builtin.assert:
+    that:
+      - nutanix_pe_host | default('') | length > 0
+      - nutanix_password | default('') | length > 0
+    fail_msg: >-
+      snapshot_provider=nutanix but nutanix_pe_host / vault_nutanix_password
+      are not set. See group_vars/all.yml and windows_vault.yml.example.
+  delegate_to: localhost
+
+- name: Look up the VM in Prism
+  ansible.builtin.uri:
+    url: "https://{{ nutanix_pe_host }}:{{ nutanix_pe_port }}/api/nutanix/v2.0/vms/?filter=vm_name=={{ nutanix_vm_name | default(inventory_hostname_short) }}"
+    method: GET
+    user: "{{ nutanix_user }}"
+    password: "{{ nutanix_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ nutanix_validate_certs }}"
+    return_content: true
+    timeout: 30
+  register: ntnx_vm
+  delegate_to: localhost
+  no_log: true    # basic-auth credentials appear in module args otherwise
+
+- name: Fail clearly when the VM cannot be identified
+  ansible.builtin.fail:
+    msg: >-
+      Prism returned {{ ntnx_vm.json.entities | default([]) | length }} VM(s)
+      named '{{ nutanix_vm_name | default(inventory_hostname_short) }}'.
+      Exactly one is required. If the Prism name differs from the inventory
+      name, set nutanix_vm_name in host_vars for this host.
+  when: (ntnx_vm.json.entities | default([])) | length != 1
+  delegate_to: localhost
+
+- name: Name the snapshot
+  ansible.builtin.set_fact:
+    ntnx_snapshot_name: "{{ nutanix_snapshot_prefix }}-{{ inventory_hostname_short }}-{{ '%Y%m%d-%H%M%S' | strftime }}"
+
+- name: Create the snapshot
+  ansible.builtin.uri:
+    url: "https://{{ nutanix_pe_host }}:{{ nutanix_pe_port }}/api/nutanix/v2.0/snapshots/"
+    method: POST
+    user: "{{ nutanix_user }}"
+    password: "{{ nutanix_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ nutanix_validate_certs }}"
+    body_format: json
+    body:
+      snapshot_specs:
+        - snapshot_name: "{{ ntnx_snapshot_name }}"
+          vm_uuid: "{{ ntnx_vm.json.entities[0].uuid }}"
+    status_code: [200, 201]
+    timeout: 30
+  register: ntnx_snap
+  delegate_to: localhost
+  no_log: true
+
+- name: Wait for the snapshot task to finish
+  ansible.builtin.uri:
+    url: "https://{{ nutanix_pe_host }}:{{ nutanix_pe_port }}/api/nutanix/v2.0/tasks/{{ ntnx_snap.json.task_uuid }}"
+    method: GET
+    user: "{{ nutanix_user }}"
+    password: "{{ nutanix_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ nutanix_validate_certs }}"
+    return_content: true
+    timeout: 30
+  register: ntnx_task
+  delegate_to: localhost
+  no_log: true
+  retries: 30
+  delay: 10
+  until: ntnx_task.json.progress_status | default('') in ['Succeeded', 'Failed', 'Aborted']
+  failed_when: ntnx_task.json.progress_status | default('') != 'Succeeded'
+
+- name: Snapshot confirmation
+  ansible.builtin.debug:
+    msg: "Snapshot '{{ ntnx_snapshot_name }}' created for {{ inventory_hostname }}."
+
+# Snapshots are not free: each one holds vdisk deltas and Nutanix caps
+# snapshots per VM. Prune old prepatch-* snapshots in Prism after a successful
+# ring, or schedule cleanup - do not let them accumulate for months.

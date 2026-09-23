@@ -1,0 +1,5 @@
+---
+# Ubuntu / Debian.
+# Apply granularity on this family is the package: apt has no advisory objects,
+# so approvals are per package name and installs are --only-upgrade.
+ansible_python_interpreter: /usr/bin/python3

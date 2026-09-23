@@ -1,0 +1,186 @@
+---
+# deploy_wazuh_agent.yml - installs the Wazuh agent on Windows targets and
+# registers it with the manager on the patchmgr VM.
+#
+# Wazuh's Vulnerability Detection module correlates the software + hotfix
+# inventory the agent reports against the NVD and Microsoft feeds, so it tells
+# you which CVEs your MISSING patches leave open. That is the part a pure
+# patch-count dashboard cannot give you.
+#
+#   ansible-playbook playbooks/deploy_wazuh_agent.yml -e wazuh_manager_ip=10.20.30.10
+
+- name: Deploy Wazuh agent to Windows hosts
+  hosts: windows
+  gather_facts: false
+  vars:
+    wazuh_version: "4.14.0-1"     # check https://packages.wazuh.com for current
+    wazuh_manager_ip: "{{ hostvars['localhost']['ansible_default_ipv4']['address'] | default('CHANGE_ME') }}"
+    wazuh_agent_group: "windows-servers"
+    wazuh_msi_url: "https://packages.wazuh.com/4.x/windows/wazuh-agent-{{ wazuh_version }}.msi"
+    wazuh_msi_local: 'C:\Windows\Temp\wazuh-agent.msi'
+    wazuh_registration_password: "{{ vault_wazuh_enrollment_password | default(omit) }}"
+
+  tasks:
+    - name: Check whether the agent is already present
+      ansible.windows.win_service_info:
+        name: WazuhSvc
+      register: wazuh_svc
+      failed_when: false
+
+    - name: Report existing installation
+      ansible.builtin.debug:
+        msg: "Wazuh agent already installed on {{ inventory_hostname }}, state={{ wazuh_svc.services[0].state }}"
+      when: wazuh_svc.services | default([]) | length > 0
+
+    - name: Install and enrol the agent
+      when: wazuh_svc.services | default([]) | length == 0
+      block:
+        - name: Download the agent MSI
+          ansible.windows.win_get_url:
+            url: "{{ wazuh_msi_url }}"
+            dest: "{{ wazuh_msi_local }}"
+            # Pin the checksum in production. Publish it from your own artifact store
+            # rather than trusting an unauthenticated download at install time.
+          register: msi_dl
+          until: msi_dl is succeeded
+          retries: 3
+          delay: 10
+
+        - name: Install the agent with enrolment parameters
+          ansible.windows.win_package:
+            path: "{{ wazuh_msi_local }}"
+            arguments: >-
+              /q
+              WAZUH_MANAGER="{{ wazuh_manager_ip }}"
+              WAZUH_REGISTRATION_SERVER="{{ wazuh_manager_ip }}"
+              WAZUH_AGENT_GROUP="{{ wazuh_agent_group }}"
+              WAZUH_AGENT_NAME="{{ inventory_hostname_short }}"
+              {% if wazuh_registration_password is defined %}
+              WAZUH_REGISTRATION_PASSWORD="{{ wazuh_registration_password }}"
+              {% endif %}
+            state: present
+          register: wazuh_install
+
+        - name: Remove the installer
+          ansible.windows.win_file:
+            path: "{{ wazuh_msi_local }}"
+            state: absent
+
+    - name: Ensure the agent service is running and automatic
+      ansible.windows.win_service:
+        name: WazuhSvc
+        state: started
+        start_mode: auto
+
+    - name: Open outbound to the manager
+      community.windows.win_firewall_rule:
+        name: patchmgr-wazuh-agent-out
+        localport: 1514-1515
+        action: allow
+        direction: out
+        protocol: tcp
+        remoteip: "{{ wazuh_manager_ip }}"
+        state: present
+        enabled: true
+
+    - name: Confirm the agent connected
+      ansible.windows.win_shell: |
+        $log = 'C:\Program Files (x86)\ossec-agent\ossec.log'
+        if (Test-Path $log) {
+          Select-String -Path $log -Pattern 'Connected to the server|Requesting a key' |
+            Select-Object -Last 3 | ForEach-Object { $_.Line }
+        } else { 'ossec.log not found yet' }
+      register: wazuh_log
+      changed_when: false
+      retries: 6
+      delay: 10
+      until: "'Connected to the server' in (wazuh_log.stdout | default(''))"
+      failed_when: false
+
+    - name: Connection status
+      ansible.builtin.debug:
+        var: wazuh_log.stdout_lines
+
+- name: Verify agents are visible on the manager
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: List enrolled agents
+      ansible.builtin.command: /var/ossec/bin/agent_control -l
+      register: agent_list
+      changed_when: false
+      become: true
+
+    - name: Show enrolled agents
+      ansible.builtin.debug:
+        var: agent_list.stdout_lines
+
+# ---------------------------------------------------------------------------
+- name: Deploy Wazuh agent to RHEL-family hosts
+  hosts: rhel
+  gather_facts: true
+  vars:
+    wazuh_manager_ip: "{{ hostvars['localhost']['ansible_default_ipv4']['address'] | default('CHANGE_ME') }}"
+    wazuh_agent_group: linux-servers
+  tasks:
+    - name: Add the Wazuh yum repo
+      ansible.builtin.yum_repository:
+        name: wazuh
+        description: Wazuh repository
+        baseurl: https://packages.wazuh.com/4.x/yum/
+        gpgkey: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        gpgcheck: true
+        enabled: true
+
+    # WAZUH_MANAGER as an env var at install time is the documented rpm/deb
+    # enrolment mechanism - it writes ossec.conf on first install only.
+    - name: Install the agent
+      ansible.builtin.package:
+        name: wazuh-agent
+        state: present
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+        WAZUH_AGENT_NAME: "{{ inventory_hostname_short }}"
+
+    - name: Enable and start
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: started
+        enabled: true
+
+# ---------------------------------------------------------------------------
+- name: Deploy Wazuh agent to Ubuntu/Debian hosts
+  hosts: ubuntu
+  gather_facts: false
+  vars:
+    wazuh_manager_ip: "{{ hostvars['localhost']['ansible_default_ipv4']['address'] | default('CHANGE_ME') }}"
+    wazuh_agent_group: linux-servers
+  tasks:
+    - name: Install the Wazuh apt key
+      ansible.builtin.get_url:
+        url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        dest: /usr/share/keyrings/wazuh.asc
+        mode: '0644'
+
+    - name: Add the Wazuh apt repo
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/wazuh.asc] https://packages.wazuh.com/4.x/apt/ stable main"
+        filename: wazuh
+        state: present
+
+    - name: Install the agent
+      ansible.builtin.apt:
+        name: wazuh-agent
+        state: present
+        update_cache: true
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+        WAZUH_AGENT_NAME: "{{ inventory_hostname_short }}"
+
+    - name: Enable and start
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: started
+        enabled: true
