@@ -465,6 +465,10 @@ The same repo runs in both; only sizing, snapshots, and networking differ.
 
 ## Layout
 
+Start-to-finish lab and cutover runbook, with the test plan and acceptance
+reports: **docs/LAB-TO-PRODUCTION.md**.
+
+
 ```
 install/
   bootstrap.sh                  control node build (Ubuntu + RHEL)
